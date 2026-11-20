@@ -1040,25 +1040,20 @@ export class FaustBaseWebAudioDsp implements IFaustBaseWebAudioDsp {
                 // Parse 'midi' metadata
                 if (midi) {
                     const strMidi = midi.trim();
-                    if (strMidi === 'pitchwheel') {
-                        const matched = strMidi.match(/^pitchwheel\s(\d+)/);
-                        // "pitchwheel chan"
-                        if (matched) {
-                            this.fPitchwheelLabel.push({
-                                path: item.address,
-                                chan: parseInt(matched[1]),
-                                min: item.min as number,
-                                max: item.max as number
-                            });
-                            // "pitchwheel"
-                        } else {
-                            this.fPitchwheelLabel.push({
-                                path: item.address,
-                                chan: 0,
-                                min: item.min as number,
-                                max: item.max as number
-                            });
-                        }
+                    // "pitchwheel", "pitchwheel chan" - or "pitchbend", as
+                    // the C++ MidiUI reads it (chan in 1..16, none: any)
+                    const matchedWheel = strMidi.match(
+                        /^(?:pitchwheel|pitchbend)(?:\s+(\d+))?(?:\s|$)/
+                    );
+                    if (matchedWheel) {
+                        this.fPitchwheelLabel.push({
+                            path: item.address,
+                            chan: matchedWheel[1]
+                                ? parseInt(matchedWheel[1])
+                                : 0,
+                            min: item.min as number,
+                            max: item.max as number
+                        });
                     } else {
                         // "ctrl num chan"
                         const matched2 = strMidi.match(/^ctrl\s(\d+)\s(\d+)/);
