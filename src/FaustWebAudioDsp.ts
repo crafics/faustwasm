@@ -976,6 +976,18 @@ export class FaustBaseWebAudioDsp implements IFaustBaseWebAudioDsp {
         max: number;
     }[][] = new Array(128).fill(null).map(() => []);
 
+    // Faust's MIDI sync controls, as the C++ MidiUI plays them: `[midi:start]`
+    // set to 1 by a Start or a Continue, `[midi:stop]` to 0 by a Stop,
+    // `[midi:clock]` toggled by each clock, `[midi:songpos]` the song position
+    // in sixteenths - the place of the last clock (a Song Position Pointer sets
+    // the place of the next one, a Start makes it 0, each clock moves it on by
+    // a sixth: fNextTick counts whole clocks, so it stays exact)
+    protected fStartLabel: string[] = [];
+    protected fStopLabel: string[] = [];
+    protected fClockLabel: { path: string; state: boolean }[] = [];
+    protected fSongPosLabel: string[] = [];
+    protected fNextTick = 0;
+
     // Received MIDI channel in 1..16, 0 for all channels (see setMidiChannel)
     protected fMidiChannel = 0;
 
@@ -1040,7 +1052,19 @@ export class FaustBaseWebAudioDsp implements IFaustBaseWebAudioDsp {
                 // Parse 'midi' metadata
                 if (midi) {
                     const strMidi = midi.trim();
-                    if (strMidi === 'pitchwheel') {
+                    // MIDI sync (a checkbox often carries both start and stop)
+                    if (strMidi === 'start') {
+                        this.fStartLabel.push(item.address);
+                    } else if (strMidi === 'stop') {
+                        this.fStopLabel.push(item.address);
+                    } else if (strMidi === 'clock') {
+                        this.fClockLabel.push({
+                            path: item.address,
+                            state: false
+                        });
+                    } else if (strMidi === 'songpos') {
+                        this.fSongPosLabel.push(item.address);
+                    } else if (strMidi === 'pitchwheel') {
                         const matched = strMidi.match(/^pitchwheel\s(\d+)/);
                         // "pitchwheel chan"
                         if (matched) {
@@ -1788,6 +1812,8 @@ export class FaustBaseWebAudioDsp implements IFaustBaseWebAudioDsp {
     midiMessage(data: number[] | Uint8Array) {
         if (!this.acceptMidiStatus(data[0])) return;
         if (this.fPlotHandler) this.fCachedEvents.push({ data, type: 'midi' });
+        // MIDI sync: real-time messages and the Song Position Pointer
+        if (data[0] >= 0xf0) return this.syncMessage(data);
         const cmd = data[0] >> 4;
         const channel = data[0] & 0xf;
         const data1 = data[1];
@@ -1801,6 +1827,60 @@ export class FaustBaseWebAudioDsp implements IFaustBaseWebAudioDsp {
         if (cmd === 8) {
             return this.keyOff(channel, data1, data2);
         }
+    }
+
+    /**
+     * MIDI's real-time messages and its Song Position Pointer onto the sync
+     * controls, as the C++ midi_handler and MidiUI play them: a Start plays
+     * from the song's beginning (its position is 0), a Continue as a Start
+     * keeps the position, a Stop, a clock; the Song Position Pointer's 14 bits
+     * are sixteenths.
+     */
+    protected syncMessage(data: number[] | Uint8Array) {
+        switch (data[0]) {
+            case 0xf8:
+                return this.syncClock();
+            case 0xfa:
+                this.syncSongPosition(0);
+                return this.syncStart();
+            case 0xfb:
+                return this.syncStart();
+            case 0xfc:
+                return this.syncStop();
+            case 0xf2:
+                return this.syncSongPosition(data[1] | (data[2] << 7));
+        }
+    }
+    /** A sync control set, and shown where a host follows the values. */
+    protected setSyncValue(path: string, value: number) {
+        this.setParamValue(path, value);
+        if (this.fOutputHandler)
+            this.fOutputHandler(path, this.getParamValue(path));
+    }
+    protected syncStart() {
+        this.fStartLabel.forEach((path) => this.setSyncValue(path, 1));
+    }
+    protected syncStop() {
+        this.fStopLabel.forEach((path) => this.setSyncValue(path, 0));
+    }
+    protected syncClock() {
+        this.fClockLabel.forEach((clock) => {
+            clock.state = !clock.state;
+            this.setSyncValue(clock.path, clock.state ? 1 : 0);
+        });
+        if (this.fSongPosLabel.length) {
+            const place = this.fNextTick / 6;
+            this.fSongPosLabel.forEach((path) =>
+                this.setSyncValue(path, place)
+            );
+            this.fNextTick++;
+        }
+    }
+    protected syncSongPosition(sixteenths: number) {
+        this.fNextTick = 6 * sixteenths;
+        this.fSongPosLabel.forEach((path) =>
+            this.setSyncValue(path, sixteenths)
+        );
     }
 
     ctrlChange(channel: number, ctrl: number, value: number) {
